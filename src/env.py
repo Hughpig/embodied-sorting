@@ -116,24 +116,31 @@ class SortingEnv:
 
     def _sample_positions(self, n: int) -> List[Pose2D]:
         positions = []
-        for _ in range(400):
+        for _ in range(1000):  # 增加尝试次数，确保能找到足够多的空位
             if len(positions) >= n:
                 break
-            x = float(self.rng.uniform(0.38, 0.68))
-            y = float(self.rng.uniform(-0.05, 0.25))
-            if all(math.hypot(x - px, y - py) >= 0.11 for px, py in positions):
+            # 核心拓展：在机械臂的绝对“舒适区”内随机生成坐标
+            x = float(self.rng.uniform(0.35, 0.60))
+            y = float(self.rng.uniform(0.00, 0.28))
+            
+            # 防重叠机制：新生成的方块必须和已有方块相距至少 6 厘米
+            if all(math.hypot(x - px, y - py) >= 0.06 for px, py in positions):
                 positions.append((x, y))
+                
+        # 如果实在找不到空位（太拥挤），强制给默认值兜底
         while len(positions) < n:
-            i = len(positions)
-            positions.append((0.40 + 0.08 * i, 0.12))
+            positions.append((0.40, 0.12))
         return positions
 
     def reset(self, n_blocks: int = 4) -> List[BlockInfo]:
         self.clear_blocks()
         self.reset_arm()
-        colors = ["red", "green", "blue", "red"]
-        # 核心修复：把 X 坐标控制在 0.35 ~ 0.55 的机械臂"舒适区"内
-        positions = [(0.35, 0.12), (0.42, 0.18), (0.49, 0.12), (0.56, 0.18)]
+        
+        # 核心拓展：完全随机生成颜色序列
+        available_colors = ["red", "green", "blue"]
+        colors = [str(self.rng.choice(available_colors)) for _ in range(n_blocks)]
+        positions = self._sample_positions(n_blocks)
+        
         self.blocks = [self._spawn_block(c, xy) for c, xy in zip(colors, positions)]
         for _ in range(60):
             p.stepSimulation()

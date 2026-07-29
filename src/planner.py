@@ -14,6 +14,22 @@ class Planner:
         self.detections = []
         self.current = None
         self.done = False
+        
+        # ==========================================
+        # 🎓 核心拓展：状态记忆与平铺码垛算法 (Palletizing)
+        # 记录每种颜色已经成功放置了多少个方块
+        # ==========================================
+        self.placed_counts = {"red": 0, "green": 0, "blue": 0}
+        # 预设的座位表（相对于目标中心点的坐标偏移量 dx, dy）
+        self.place_offsets = [
+            (0.0, 0.0),       # 第1个：正中心
+            (0.0, 0.05),      # 第2个：靠上
+            (0.0, -0.05),     # 第3个：靠下
+            (0.05, 0.05),     # 第4个：右上
+            (-0.05, -0.05),   # 第5个：左下
+            (0.05, -0.05),    # 第6个：右下
+            (-0.05, 0.05),    # 第7个：左上
+        ]
 
     def step(self) -> str:
         if self.state == "SCAN":
@@ -25,19 +41,12 @@ class Planner:
                 u, v = d["pixel"]
                 x_vision, y_vision = self.env.pixel_to_world(u, v)
                 
-                # ==========================================
-                # 🎓 核心绝杀：相似三角形视差补偿 (Parallax Correction)
-                # 相机在 X=0.50, Y=0.0, Z=1.40。
-                # 视觉交点在桌面 Z=0.625，方块顶面在 Z=0.665。
-                # ==========================================
+                # 视差补偿 (Parallax Correction)
                 cam_x, cam_y, cam_z = 0.50, 0.0, 1.40
                 table_z = WORKSPACE["z_table"]
                 block_z = table_z + 0.04
-                
-                # 相似三角形比例 = (相机到方块顶部的高度) / (相机到桌面的高度)
                 ratio = (cam_z - block_z) / (cam_z - table_z)
                 
-                # 修正后的真实物理坐标
                 x_real = cam_x + (x_vision - cam_x) * ratio
                 y_real = cam_y + (y_vision - cam_y) * ratio
                 
@@ -62,9 +71,24 @@ class Planner:
 
         elif self.state == "PICK_AND_PLACE":
             start = self.current["world"]
-            goal = self.env.get_target_pose(self.current["color"])[:2]
+            color = self.current["color"]
+            base_goal = self.env.get_target_pose(color)[:2]
             
+            # ==========================================
+            # 分配座位：根据已放置的数量，获取偏移量
+            # ==========================================
+            count = self.placed_counts[color]
+            idx = count % len(self.place_offsets) # 防止越界
+            dx, dy = self.place_offsets[idx]
+            
+            # 计算最终的平铺目标坐标
+            goal = (base_goal[0] + dx, base_goal[1] + dy)
+            
+            # 执行抓放
             self.controller.pick_and_place(start, goal)
+            
+            # 更新计数器
+            self.placed_counts[color] += 1
             self.state = "RETURN_HOME"
 
         elif self.state == "RETURN_HOME":
