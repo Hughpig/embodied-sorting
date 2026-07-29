@@ -7,9 +7,8 @@ class Controller:
     def __init__(self, env: SortingEnv) -> None:
         self.env = env
         self.z_safe = 0.85
-        # 核心修复：把抓取高度从 z_table + 0.025 降低到 z_table + 0.010
-        # 让手指深深地插到底，彻底抱住方块的两侧，无视几毫米的视觉误差！
-        self.z_pick = WORKSPACE["z_table"] + 0.010
+        # 指尖刚好捏在方块上半部
+        self.z_pick = WORKSPACE["z_table"] + 0.025
         self.down_orn = p.getQuaternionFromEuler([np.pi, 0.0, np.pi / 2])
 
     def move_to(self, xy: list, z: float, steps: int = 150) -> None:
@@ -32,19 +31,40 @@ class Controller:
         goal = np.array(target_xy, dtype=float)
 
         self.open_gripper()
-        self.move_to(start, self.z_safe)
+        # 1. 飞到方块正上方，停稳
+        self.move_to(start, self.z_safe, steps=150)
         
-        self.move_to(start, self.z_pick, steps=100)
+        # ==================================================
+        # 🎓 核心绝杀：笛卡尔空间垂直电梯式插值 (Cartesian Z-Waypoints)
+        # 强制锁死 X 和 Y 不变，将 Z 轴下降拆分成 10 份。
+        # 彻底消灭关节空间插值带来的“画弧线踢飞方块”效应！
+        # ==================================================
+        num_waypoints = 10
+        for i in range(1, num_waypoints + 1):
+            interp_z = self.z_safe + (self.z_pick - self.z_safe) * (i / num_waypoints)
+            self.move_to(start, interp_z, steps=15)
         
+        # 确保下降到位后彻底停稳
+        self.move_to(start, self.z_pick, steps=40)
+        
+        # 3. 稳稳夹紧
         self.close_gripper()
         
-        self.move_to(start, self.z_safe, steps=100)
+        # 4. 同样像电梯一样垂直抬起，防止出坑时把方块甩出去
+        for i in range(1, num_waypoints + 1):
+            interp_z = self.z_pick + (self.z_safe - self.z_pick) * (i / num_waypoints)
+            self.move_to(start, interp_z, steps=15)
         
+        self.move_to(start, self.z_safe, steps=40)
+        
+        # 5. 飞往目标区域
         self.move_to(goal, self.z_safe, steps=200)
         
+        # 6. 下降到安全高度投放
         z_drop = WORKSPACE["z_table"] + 0.12
         self.move_to(goal, z_drop, steps=100)
         
         self.open_gripper()
         
+        # 7. 回归安全高度
         self.move_to(goal, self.z_safe, steps=100)
