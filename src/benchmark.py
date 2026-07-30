@@ -16,8 +16,9 @@ from src.planner import Planner
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Benchmark for Sorting System")
-    parser.add_argument("--mode", type=str, choices=["random", "nearest"], default="nearest",
-                        help="测试模式: random(随机) 或 nearest(最近优先)")
+    # 🎓 核心扩展：加入 servo 模式！
+    parser.add_argument("--mode", type=str, choices=["random", "nearest", "servo"], default="nearest",
+                        help="测试模式: random(随机), nearest(最近优先), servo(纯视觉伺服)")
     parser.add_argument("--episodes", type=int, default=5,
                         help="跑多少轮测试")
     args, _ = parser.parse_known_args()
@@ -46,27 +47,32 @@ def run_benchmark(mode="nearest", num_episodes=5):
             blocks = env.reset(n_blocks=n_blocks)
             planner = Planner(env, vision, controller)
             
-            # ==========================================
-            # 🎓 核心修复：给 Planner 注入运行模式！
-            # ==========================================
             planner.set_mode(mode)
             
             start_time = time.time()
             actions_taken = 0
+            step_count = 0
+            # 🎓 增加安全锁：伺服模式步数较多，放宽到 2500 步，超时强制结束本轮
+            max_steps = 2500 
             
             print(f"\n[{time.strftime('%H:%M:%S')}] --- Starting Episode {ep}/{num_episodes} ({mode}) with {n_blocks} blocks ---")
             
-            while planner.state != "FINISH" and actions_taken < 15:
+            while planner.state != "FINISH" and actions_taken < 15 and step_count < max_steps:
                 prev_state = planner.state
                 planner.step()
+                step_count += 1
                 
-                if prev_state == "PICK_AND_PLACE" and planner.state == "RETURN_HOME":
+                # 🎓 核心修复：兼容伺服模式的动作计数逻辑 (VS_DELIVER)
+                if prev_state in ["PICK_AND_PLACE", "VS_DELIVER"] and planner.state == "RETURN_HOME":
                     actions_taken += 1
             
             time_cost = time.time() - start_time
             ok, total = env.count_success()
             rate = (ok / total) * 100 if total > 0 else 0
             
+            if step_count >= max_steps:
+                print(f"[⚠️ WARNING] Episode {ep} 触发超时安全锁！强制结算。")
+                
             print(f"[{time.strftime('%H:%M:%S')}] Episode {ep} Finished: {ok}/{total} ({rate:.1f}%) in {time_cost:.1f}s")
             
             writer.writerow([ep, mode, total, ok, f"{rate:.1f}", f"{time_cost:.1f}", actions_taken])
