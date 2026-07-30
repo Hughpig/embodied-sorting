@@ -18,6 +18,7 @@ COLOR_RGB: Dict[ColorName, RGB] = {
     "red": (0.95, 0.12, 0.10),
     "green": (0.10, 0.78, 0.18),
     "blue": (0.12, 0.35, 0.95),
+    "grey": (0.50, 0.50, 0.50),  # 干扰物颜色
 }
 
 WORKSPACE = {
@@ -98,23 +99,25 @@ class SortingEnv:
         col = p.createCollisionShape(p.GEOM_BOX, halfExtents=[half, half, half])
         vis = p.createVisualShape(p.GEOM_BOX, halfExtents=[half, half, half], rgbaColor=[*COLOR_RGB[color], 1.0])
         z = WORKSPACE["z_table"] + half + 0.001
-        body = p.createMultiBody(0.04, col, vis, [xy[0], xy[1], z])
+        
+        # 随机偏转角
+        yaw = float(self.rng.uniform(0, np.pi / 2))
+        orn = p.getQuaternionFromEuler([0, 0, yaw])
+        
+        body = p.createMultiBody(0.04, col, vis, [xy[0], xy[1], z], orn)
         p.changeDynamics(body, -1, lateralFriction=1.5, spinningFriction=0.2)
         return BlockInfo(body_id=body, color=color, size=size)
 
     def clear_blocks(self) -> None:
         for block in self.blocks:
-            try:
-                p.removeBody(block.body_id)
-            except Exception:
-                pass
+            try: p.removeBody(block.body_id)
+            except Exception: pass
         self.blocks = []
 
     def _sample_positions(self, n: int) -> List[Pose2D]:
         positions = []
         for _ in range(1000):
-            if len(positions) >= n:
-                break
+            if len(positions) >= n: break
             x = float(self.rng.uniform(0.35, 0.60))
             y = float(self.rng.uniform(0.00, 0.28))
             if all(math.hypot(x - px, y - py) >= 0.06 for px, py in positions):
@@ -123,15 +126,22 @@ class SortingEnv:
             positions.append((0.40, 0.12))
         return positions
 
-    def reset(self, n_blocks: int = 4) -> List[BlockInfo]:
+    def reset(self, n_blocks: int = 4, n_distractors: int = 2) -> List[BlockInfo]:
         self.clear_blocks()
         self.reset_arm()
+        
+        total_blocks = n_blocks + n_distractors
+        positions = self._sample_positions(total_blocks)
+        
         available_colors = ["red", "green", "blue"]
         colors = [str(self.rng.choice(available_colors)) for _ in range(n_blocks)]
-        positions = self._sample_positions(n_blocks)
-        self.blocks = [self._spawn_block(c, xy) for c, xy in zip(colors, positions)]
-        for _ in range(60):
-            p.stepSimulation()
+        colors += ["grey"] * n_distractors  # 混入灰色废料
+        
+        combined = list(zip(colors, positions))
+        self.rng.shuffle(combined)
+        
+        self.blocks = [self._spawn_block(c, xy) for c, xy in combined]
+        for _ in range(60): p.stepSimulation()
         return list(self.blocks)
 
     def reset_arm(self) -> None:
@@ -140,12 +150,12 @@ class SortingEnv:
         for j in self.finger_joint_indices:
             p.resetJointState(self.robot_id, j, 0.04)
         self.set_gripper(0.08)
-        for _ in range(10):
-            p.stepSimulation()
+        for _ in range(10): p.stepSimulation()
 
     def set_gripper(self, open_width: float = 0.08) -> None:
         half = float(np.clip(open_width / 2.0, 0.0, 0.04))
         for j in self.finger_joint_indices:
+            # 恢复老版本力矩：40
             p.setJointMotorControl2(self.robot_id, j, p.POSITION_CONTROL, targetPosition=half, force=40, maxVelocity=0.2)
 
     def get_ee_pose(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -153,13 +163,13 @@ class SortingEnv:
         return np.array(st[0], dtype=float), np.array(st[1], dtype=float)
 
     def move_ee_pose(self, position: Sequence[float], orn: Optional[Sequence[float]] = None, steps: int = 140) -> float:
-        if orn is None:
-            orn = self.down_orn
+        if orn is None: orn = self.down_orn
         joint_poses = p.calculateInverseKinematics(self.robot_id, self.ee_link_index, position, orn, lowerLimits=[-2.9]*7, upperLimits=[2.9]*7, jointRanges=[5.8]*7, restPoses=self.home_joint_positions, maxNumIterations=200, residualThreshold=1e-5)
         for i, q in zip(self.arm_joint_indices, joint_poses[:7]):
             p.setJointMotorControl2(self.robot_id, i, p.POSITION_CONTROL, targetPosition=q, force=200, maxVelocity=1.0)
         for _ in range(steps):
             p.stepSimulation()
+            time.sleep(1.0 / 240.0)
         ee, _ = self.get_ee_pose()
         return float(np.linalg.norm(ee - np.asarray(position, dtype=float)))
 
@@ -167,13 +177,22 @@ class SortingEnv:
         for i, q in zip(self.arm_joint_indices, self.home_joint_positions):
             p.setJointMotorControl2(self.robot_id, i, p.POSITION_CONTROL, targetPosition=q, force=200, maxVelocity=1.0)
         self.set_gripper(0.08)
-        for _ in range(steps):
-            p.stepSimulation()
+        for _ in range(steps): p.stepSimulation()
 
     def get_camera_image(self) -> np.ndarray:
         _, _, rgba, depth, seg = p.getCameraImage(width=self.width, height=self.height, viewMatrix=self.view_matrix, projectionMatrix=self.proj_matrix, renderer=p.ER_BULLET_HARDWARE_OPENGL)
         rgb = np.reshape(np.array(rgba, dtype=np.uint8), (self.height, self.width, 4))[:, :, :3]
         return rgb
+
+    def get_eye_in_hand_image(self) -> np.ndarray:
+        ee_pos, _ = self.get_ee_pose()
+        cam_eye = [ee_pos[0], ee_pos[1], ee_pos[2] + 0.08]
+        cam_target = [ee_pos[0], ee_pos[1], 0.0]
+        cam_up = [0.0, 1.0, 0.0] 
+        view_matrix = p.computeViewMatrix(cam_eye, cam_target, cam_up)
+        proj_matrix = p.computeProjectionMatrixFOV(60.0, self.width/self.height, 0.01, 2.0)
+        _, _, rgba, _, _ = p.getCameraImage(width=self.width, height=self.height, viewMatrix=view_matrix, projectionMatrix=proj_matrix, renderer=p.ER_BULLET_HARDWARE_OPENGL)
+        return np.reshape(np.array(rgba, dtype=np.uint8), (self.height, self.width, 4))[:, :, :3]
 
     def pixel_to_world(self, u: float, v: float) -> Pose2D:
         fov_rad = math.radians(self.cam_fov)
@@ -192,44 +211,24 @@ class SortingEnv:
         dir_cam = dir_cam / (np.linalg.norm(dir_cam) + 1e-9)
         origin = np.array(self.cam_eye, dtype=float)
         z_table = WORKSPACE["z_table"]
-        if abs(dir_cam[2]) < 1e-9:
-            return (float(self.cam_target[0]), float(self.cam_target[1]))
+        if abs(dir_cam[2]) < 1e-9: return (float(self.cam_target[0]), float(self.cam_target[1]))
         t = (z_table - origin[2]) / dir_cam[2]
         point = origin + t * dir_cam
         return (float(point[0]), float(point[1]))
-
-    def get_block_pose(self, block: BlockInfo) -> Tuple[np.ndarray, np.ndarray]:
-        pos, orn = p.getBasePositionAndOrientation(block.body_id)
-        return np.array(pos, dtype=float), np.array(orn, dtype=float)
 
     def get_target_pose(self, color: ColorName) -> np.ndarray:
         x, y = TARGET_POSES[color]
         return np.array([x, y, WORKSPACE["z_table"] + 0.02], dtype=float)
 
     def is_block_in_target(self, block: BlockInfo, tol: float = 0.10) -> bool:
-        pos, _ = self.get_block_pose(block)
+        pos, _ = p.getBasePositionAndOrientation(block.body_id)
         target = self.get_target_pose(block.color)
-        return float(np.linalg.norm(pos[:2] - target[:2])) <= tol
+        return float(np.linalg.norm(np.array(pos[:2]) - target[:2])) <= tol
 
     def count_success(self) -> Tuple[int, int]:
-        ok = sum(1 for b in self.blocks if self.is_block_in_target(b))
-        return ok, len(self.blocks)
+        valid_blocks = [b for b in self.blocks if b.color in TARGET_POSES]
+        ok = sum(1 for b in valid_blocks if self.is_block_in_target(b))
+        return ok, len(valid_blocks)
 
     def close(self) -> None:
-        if p.isConnected(self.client):
-            p.disconnect(self.client)
-
-    # === [为 Servo 模式追加的函数] ===
-    def get_eye_in_hand_image(self) -> np.ndarray:
-        ee_pos, _ = self.get_ee_pose()
-        cam_eye = [ee_pos[0], ee_pos[1], ee_pos[2] + 0.08]
-        cam_target = [ee_pos[0], ee_pos[1], 0.0]
-        cam_up = [0.0, 1.0, 0.0] 
-        view_matrix = p.computeViewMatrix(cam_eye, cam_target, cam_up)
-        proj_matrix = p.computeProjectionMatrixFOV(60.0, self.width/self.height, 0.01, 2.0)
-        _, _, rgba, _, _ = p.getCameraImage(
-            width=self.width, height=self.height,
-            viewMatrix=view_matrix, projectionMatrix=proj_matrix,
-            renderer=p.ER_BULLET_HARDWARE_OPENGL
-        )
-        return np.reshape(np.array(rgba, dtype=np.uint8), (self.height, self.width, 4))[:, :, :3]
+        if p.isConnected(self.client): p.disconnect(self.client)
