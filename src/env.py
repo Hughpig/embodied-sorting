@@ -1,8 +1,8 @@
 ﻿"""Visual-guided robotic arm desktop sorting environment."""
 
 from __future__ import annotations
-
 import math
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -10,11 +10,9 @@ import numpy as np
 import pybullet as p
 import pybullet_data
 
-
 ColorName = str
 RGB = Tuple[float, float, float]
 Pose2D = Tuple[float, float]
-
 
 COLOR_RGB: Dict[ColorName, RGB] = {
     "red": (0.95, 0.12, 0.10),
@@ -36,13 +34,11 @@ TARGET_POSES: Dict[ColorName, Pose2D] = {
     "blue": (0.65, -0.35),
 }
 
-
 @dataclass
 class BlockInfo:
     body_id: int
     color: ColorName
     size: float = 0.04
-
 
 class SortingEnv:
     def __init__(self, gui: bool = True, width: int = 640, height: int = 480) -> None:
@@ -116,18 +112,13 @@ class SortingEnv:
 
     def _sample_positions(self, n: int) -> List[Pose2D]:
         positions = []
-        for _ in range(1000):  # 增加尝试次数，确保能找到足够多的空位
+        for _ in range(1000):
             if len(positions) >= n:
                 break
-            # 核心拓展：在机械臂的绝对“舒适区”内随机生成坐标
             x = float(self.rng.uniform(0.35, 0.60))
             y = float(self.rng.uniform(0.00, 0.28))
-            
-            # 防重叠机制：新生成的方块必须和已有方块相距至少 6 厘米
             if all(math.hypot(x - px, y - py) >= 0.06 for px, py in positions):
                 positions.append((x, y))
-                
-        # 如果实在找不到空位（太拥挤），强制给默认值兜底
         while len(positions) < n:
             positions.append((0.40, 0.12))
         return positions
@@ -135,12 +126,9 @@ class SortingEnv:
     def reset(self, n_blocks: int = 4) -> List[BlockInfo]:
         self.clear_blocks()
         self.reset_arm()
-        
-        # 核心拓展：完全随机生成颜色序列
         available_colors = ["red", "green", "blue"]
         colors = [str(self.rng.choice(available_colors)) for _ in range(n_blocks)]
         positions = self._sample_positions(n_blocks)
-        
         self.blocks = [self._spawn_block(c, xy) for c, xy in zip(colors, positions)]
         for _ in range(60):
             p.stepSimulation()
@@ -227,9 +215,21 @@ class SortingEnv:
         ok = sum(1 for b in self.blocks if self.is_block_in_target(b))
         return ok, len(self.blocks)
 
-    def unsorted_blocks(self, tol: float = 0.10) -> List[BlockInfo]:
-        return [b for b in self.blocks if not self.is_block_in_target(b, tol=tol)]
-
     def close(self) -> None:
         if p.isConnected(self.client):
             p.disconnect(self.client)
+
+    # === [为 Servo 模式追加的函数] ===
+    def get_eye_in_hand_image(self) -> np.ndarray:
+        ee_pos, _ = self.get_ee_pose()
+        cam_eye = [ee_pos[0], ee_pos[1], ee_pos[2] + 0.08]
+        cam_target = [ee_pos[0], ee_pos[1], 0.0]
+        cam_up = [0.0, 1.0, 0.0] 
+        view_matrix = p.computeViewMatrix(cam_eye, cam_target, cam_up)
+        proj_matrix = p.computeProjectionMatrixFOV(60.0, self.width/self.height, 0.01, 2.0)
+        _, _, rgba, _, _ = p.getCameraImage(
+            width=self.width, height=self.height,
+            viewMatrix=view_matrix, projectionMatrix=proj_matrix,
+            renderer=p.ER_BULLET_HARDWARE_OPENGL
+        )
+        return np.reshape(np.array(rgba, dtype=np.uint8), (self.height, self.width, 4))[:, :, :3]
