@@ -177,7 +177,7 @@ class SortingEnv:
         for i, q in zip(self.arm_joint_indices, self.home_joint_positions):
             p.setJointMotorControl2(self.robot_id, i, p.POSITION_CONTROL, targetPosition=q, force=200, maxVelocity=1.0)
         self.set_gripper(0.08)
-        for _ in range(steps): p.stepSimulation()
+        for _ in range(steps): time.sleep(1.0 / 240.0); p.stepSimulation()
 
     def get_camera_image(self) -> np.ndarray:
         _, _, rgba, depth, seg = p.getCameraImage(width=self.width, height=self.height, viewMatrix=self.view_matrix, projectionMatrix=self.proj_matrix, renderer=p.ER_BULLET_HARDWARE_OPENGL)

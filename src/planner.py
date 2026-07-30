@@ -163,7 +163,11 @@ class Planner:
             self.controller.open_gripper(width=0.08)
             for _ in range(40): p.stepSimulation(); time.sleep(1.0/240.0)
             self.controller.move_to(goal, self.controller.z_safe, orn=self.controller.down_orn, steps=100)
-            
+
+            for _ in range(120): 
+                p.stepSimulation()
+                time.sleep(1.0 / 240.0)
+
             self.placed_counts[color] += 1
             self.state = "RETURN_HOME"
 

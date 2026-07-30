@@ -90,3 +90,7 @@ class Controller:
         self.open_gripper(width=0.080)
         for _ in range(40): p.stepSimulation(); time.sleep(1.0 / 240.0)
         self.move_to(goal, self.z_safe, orn=self.down_orn, steps=100)
+
+        for _ in range(120): 
+            p.stepSimulation()
+            time.sleep(1.0 / 240.0)
