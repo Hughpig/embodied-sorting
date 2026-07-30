@@ -18,21 +18,15 @@ COLOR_RGB: Dict[ColorName, RGB] = {
     "red": (0.95, 0.12, 0.10),
     "green": (0.10, 0.78, 0.18),
     "blue": (0.12, 0.35, 0.95),
-    "grey": (0.50, 0.50, 0.50),  # 干扰物颜色
+    "grey": (0.50, 0.50, 0.50),  
 }
 
 WORKSPACE = {
-    "x_min": 0.30,
-    "x_max": 0.70,
-    "y_min": -0.20,
-    "y_max": 0.30,
-    "z_table": 0.625,
+    "x_min": 0.30, "x_max": 0.70, "y_min": -0.20, "y_max": 0.30, "z_table": 0.625,
 }
 
 TARGET_POSES: Dict[ColorName, Pose2D] = {
-    "red": (0.35, -0.35),
-    "green": (0.50, -0.35),
-    "blue": (0.65, -0.35),
+    "red": (0.35, -0.35), "green": (0.50, -0.35), "blue": (0.65, -0.35),
 }
 
 @dataclass
@@ -42,22 +36,18 @@ class BlockInfo:
     size: float = 0.04
 
 class SortingEnv:
-    def __init__(self, gui: bool = True, width: int = 640, height: int = 480) -> None:
+    # 🎓 核心扩展：加入 add_noise 噪声开关参数
+    def __init__(self, gui: bool = True, width: int = 640, height: int = 480, add_noise: bool = False) -> None:
         self.width = width
         self.height = height
+        self.add_noise = add_noise
         self.rng = np.random.default_rng(0)
         self.client = p.connect(p.GUI if gui else p.DIRECT)
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.setGravity(0, 0, -9.81)
         p.setTimeStep(1.0 / 240.0)
 
-        p.resetDebugVisualizerCamera(
-            cameraDistance=1.35,
-            cameraYaw=55,
-            cameraPitch=-40,
-            cameraTargetPosition=[0.45, 0.0, 0.55],
-        )
-
+        p.resetDebugVisualizerCamera(cameraDistance=1.35, cameraYaw=55, cameraPitch=-40, cameraTargetPosition=[0.45, 0.0, 0.55])
         self.plane_id = p.loadURDF("plane.urdf")
         self.table_id = p.loadURDF("table/table.urdf", [0.5, 0.0, 0.0], useFixedBase=True)
         self.robot_id = p.loadURDF("franka_panda/panda.urdf", [0.0, 0.0, WORKSPACE["z_table"]], useFixedBase=True)
@@ -86,7 +76,7 @@ class SortingEnv:
     def _configure_camera(self) -> None:
         self.cam_eye = [0.50, 0.0, 1.40]
         self.cam_target = [0.50, 0.0, WORKSPACE["z_table"]]
-        self.cam_up = [1.0, 0.0, 0.0]
+        self.cam_up = [0.0, 1.0, 0.0]
         self.cam_fov = 55.0
         self.cam_near = 0.05
         self.cam_far = 3.0
@@ -99,11 +89,8 @@ class SortingEnv:
         col = p.createCollisionShape(p.GEOM_BOX, halfExtents=[half, half, half])
         vis = p.createVisualShape(p.GEOM_BOX, halfExtents=[half, half, half], rgbaColor=[*COLOR_RGB[color], 1.0])
         z = WORKSPACE["z_table"] + half + 0.001
-        
-        # 随机偏转角
         yaw = float(self.rng.uniform(0, np.pi / 2))
         orn = p.getQuaternionFromEuler([0, 0, yaw])
-        
         body = p.createMultiBody(0.04, col, vis, [xy[0], xy[1], z], orn)
         p.changeDynamics(body, -1, lateralFriction=1.5, spinningFriction=0.2)
         return BlockInfo(body_id=body, color=color, size=size)
@@ -129,17 +116,13 @@ class SortingEnv:
     def reset(self, n_blocks: int = 4, n_distractors: int = 2) -> List[BlockInfo]:
         self.clear_blocks()
         self.reset_arm()
-        
         total_blocks = n_blocks + n_distractors
         positions = self._sample_positions(total_blocks)
-        
         available_colors = ["red", "green", "blue"]
         colors = [str(self.rng.choice(available_colors)) for _ in range(n_blocks)]
-        colors += ["grey"] * n_distractors  # 混入灰色废料
-        
+        colors += ["grey"] * n_distractors  
         combined = list(zip(colors, positions))
         self.rng.shuffle(combined)
-        
         self.blocks = [self._spawn_block(c, xy) for c, xy in combined]
         for _ in range(60): p.stepSimulation()
         return list(self.blocks)
@@ -155,7 +138,6 @@ class SortingEnv:
     def set_gripper(self, open_width: float = 0.08) -> None:
         half = float(np.clip(open_width / 2.0, 0.0, 0.04))
         for j in self.finger_joint_indices:
-            # 恢复老版本力矩：40
             p.setJointMotorControl2(self.robot_id, j, p.POSITION_CONTROL, targetPosition=half, force=40, maxVelocity=0.2)
 
     def get_ee_pose(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -177,12 +159,24 @@ class SortingEnv:
         for i, q in zip(self.arm_joint_indices, self.home_joint_positions):
             p.setJointMotorControl2(self.robot_id, i, p.POSITION_CONTROL, targetPosition=q, force=200, maxVelocity=1.0)
         self.set_gripper(0.08)
-        for _ in range(steps): time.sleep(1.0 / 240.0); p.stepSimulation()
+        for _ in range(steps): 
+            p.stepSimulation()
+            # 🎓 核心修复：终于加上了延时！让机械臂从容优雅地飞回 Home！
+            time.sleep(1.0 / 240.0)
+
+    # 🎓 核心扩展：高斯传感器噪声引擎
+    def _apply_noise(self, image: np.ndarray) -> np.ndarray:
+        if not self.add_noise:
+            return image
+        # 添加标准差为 30 的强高斯噪声，模拟极差的工业级摄像头
+        noise = np.random.normal(0, 30, image.shape).astype(np.int16)
+        noisy_image = np.clip(image.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+        return noisy_image
 
     def get_camera_image(self) -> np.ndarray:
-        _, _, rgba, depth, seg = p.getCameraImage(width=self.width, height=self.height, viewMatrix=self.view_matrix, projectionMatrix=self.proj_matrix, renderer=p.ER_BULLET_HARDWARE_OPENGL)
+        _, _, rgba, _, _ = p.getCameraImage(width=self.width, height=self.height, viewMatrix=self.view_matrix, projectionMatrix=self.proj_matrix, renderer=p.ER_BULLET_HARDWARE_OPENGL)
         rgb = np.reshape(np.array(rgba, dtype=np.uint8), (self.height, self.width, 4))[:, :, :3]
-        return rgb
+        return self._apply_noise(rgb) # 加上噪声
 
     def get_eye_in_hand_image(self) -> np.ndarray:
         ee_pos, _ = self.get_ee_pose()
@@ -192,7 +186,8 @@ class SortingEnv:
         view_matrix = p.computeViewMatrix(cam_eye, cam_target, cam_up)
         proj_matrix = p.computeProjectionMatrixFOV(60.0, self.width/self.height, 0.01, 2.0)
         _, _, rgba, _, _ = p.getCameraImage(width=self.width, height=self.height, viewMatrix=view_matrix, projectionMatrix=proj_matrix, renderer=p.ER_BULLET_HARDWARE_OPENGL)
-        return np.reshape(np.array(rgba, dtype=np.uint8), (self.height, self.width, 4))[:, :, :3]
+        rgb = np.reshape(np.array(rgba, dtype=np.uint8), (self.height, self.width, 4))[:, :, :3]
+        return self._apply_noise(rgb) # 加上噪声
 
     def pixel_to_world(self, u: float, v: float) -> Pose2D:
         fov_rad = math.radians(self.cam_fov)

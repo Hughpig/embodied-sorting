@@ -12,8 +12,21 @@ class Vision:
             "blue": ([95, 50, 50], [140, 255, 255]),
         }
 
+    def _get_optimal_yaw(self, angle_deg: float) -> float:
+        angle = angle_deg
+        if angle < 0: angle += 90
+        angle = angle % 90
+        if angle > 45: angle -= 90
+        return -np.deg2rad(angle)
+
     def detect(self, image: np.ndarray) -> list:
-        hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+        # ==========================================
+        # 🎓 核心抗噪修复 1：高斯滤波 (Gaussian Blur)
+        # 像戴上近视眼镜一样，抹平满屏的高斯雪花噪点，重现纯净色块！
+        # ==========================================
+        blurred = cv2.GaussianBlur(image, (5, 5), 0)
+        hsv = cv2.cvtColor(blurred, cv2.COLOR_RGB2HSV)
+        
         detections = []
         for color, (lower, upper) in self.hsv_ranges.items():
             mask = cv2.inRange(hsv, np.array(lower), np.array(upper))
@@ -54,7 +67,13 @@ class Vision:
         return canvas
 
     def track_target(self, image: np.ndarray, target_color: str) -> dict:
-        hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+        # ==========================================
+        # 🎓 核心抗噪修复 2：伺服追踪同样加入强力中值滤波 (Median Blur)
+        # 中值滤波对雪花点（椒盐/脉冲噪声）有奇效，让追踪画面绝对锁定！
+        # ==========================================
+        blurred = cv2.medianBlur(image, 5)
+        hsv = cv2.cvtColor(blurred, cv2.COLOR_RGB2HSV)
+        
         shadow_ranges = {
             "red": ([0, 40, 20], [10, 255, 255]),
             "green": ([40, 30, 20], [90, 255, 255]),
@@ -81,7 +100,13 @@ class Vision:
             if area > 10:
                 rect = cv2.minAreaRect(cnt)
                 center, dimensions, angle_deg = rect
-                u, v = int(center[0]), int(center[1])
+                
+                w, h = dimensions
+                if min(w, h) > 0 and max(w, h) / min(w, h) > 1.5:
+                    u, v = int(center[0] + w/4), int(center[1] + h/4)
+                else:
+                    u, v = int(center[0]), int(center[1])
+
                 dist = (u - cx)**2 + (v - cy)**2
                 if dist < min_dist:
                     min_dist = dist

@@ -2,6 +2,7 @@
 import pybullet as p
 import time
 import random
+import cv2  # 🎓 重新引入 cv2 用于绘制 HUD 视窗
 from .env import SortingEnv, WORKSPACE
 from .vision import Vision
 from .controller import Controller
@@ -24,6 +25,9 @@ class Planner:
         self.servo_target_color = None
         self.servo_lost_frames = 0
         self.debug_counter = 0
+        
+        # 🎓 吐出来了！--show-vis 参数控制开关
+        self.show_vision = False
 
     def set_mode(self, mode: str, tasks: list = None):
         self.mode = mode
@@ -38,6 +42,14 @@ class Planner:
         elif self.state == "SCAN":
             image = self.env.get_camera_image()
             raw_dets = self.vision.detect(image)
+            
+            # 🎓 重新吐出：全局相机 HUD 数据标注显示
+            if self.show_vision:
+                annotated_img = self.vision.annotate(image, raw_dets)
+                bgr_img = cv2.cvtColor(annotated_img, cv2.COLOR_RGB2BGR)
+                cv2.imshow("AI Vision [Global Camera]", bgr_img)
+                cv2.waitKey(1)
+
             self.detections = []
             for d in raw_dets:
                 u, v = d["pixel"]
@@ -88,6 +100,22 @@ class Planner:
             eye_img = self.env.get_eye_in_hand_image()
             target_info = self.vision.track_target(eye_img, self.servo_target_color)
             
+            # 🎓 重新吐出：眼在手相机 十字准星 HUD 实时追踪显示
+            if self.show_vision:
+                disp_img = cv2.cvtColor(eye_img, cv2.COLOR_RGB2BGR)
+                cv2.drawMarker(disp_img, (320, 240), (0, 255, 0), cv2.MARKER_CROSS, 30, 2)
+                
+                if target_info is None:
+                    cv2.putText(disp_img, "TARGET LOST!", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                else:
+                    u_tmp, v_tmp = target_info["pixel"]
+                    cv2.circle(disp_img, (u_tmp, v_tmp), 8, (0, 0, 255), -1)
+                    cv2.putText(disp_img, f"Tracking: {self.servo_target_color.upper()}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                    cv2.putText(disp_img, f"Err: X={u_tmp-320}, Y={v_tmp-240}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    
+                cv2.imshow("AI Vision [Eye-in-Hand]", disp_img)
+                cv2.waitKey(1)
+            
             if target_info is None:
                 self.servo_lost_frames += 1
                 if self.servo_lost_frames > 15:
@@ -124,7 +152,7 @@ class Planner:
                     print(f"\n[Servo] 🎯 目标绝对锁定！")
                     print(f"[Servo] 高空悬停平滑扭腕 (目标角度: {yaw_deg:.1f}°)...")
                     
-                    self.controller.smooth_twist([current_pose[0], current_pose[1]], current_pose[2], target_yaw_world, num_waypoints=20)
+                    self.controller.smooth_twist([current_pose[0], current_pose[1]], current_pose[2], start_yaw=np.pi/2, target_yaw=target_yaw_world, num_waypoints=20)
                     for _ in range(10): p.stepSimulation()
                     
                     print(f"[Servo] 扭腕完毕，直插打击！")
@@ -155,19 +183,18 @@ class Planner:
             current_pose, current_orn = self.env.get_ee_pose()
             start = current_pose[:2]
             
-            self.controller.vertical_move([start[0], start[1]], self.controller.z_pick, self.controller.z_safe, orn=current_orn, num_waypoints=10)
-            self.controller.smooth_twist([start[0], start[1]], self.controller.z_safe, np.pi / 2, num_waypoints=20)
-            self.controller.horizontal_move(start, goal, self.controller.z_safe, orn=self.controller.down_orn, num_waypoints=15)
+            target_yaw_world = p.getEulerFromQuaternion(current_orn)[2]
+            dynamic_orn = p.getQuaternionFromEuler([np.pi, 0.0, target_yaw_world])
             
+            self.controller.vertical_move([start[0], start[1]], self.controller.z_pick, self.controller.z_safe, orn=dynamic_orn, num_waypoints=10)
+            self.controller.smooth_twist([start[0], start[1]], self.controller.z_safe, start_yaw=target_yaw_world, target_yaw=np.pi/2, num_waypoints=20)
+            
+            self.controller.horizontal_move(start, goal, self.controller.z_safe, orn=self.controller.down_orn, num_waypoints=15)
             self.controller.move_to(goal, self.controller.z_drop, orn=self.controller.down_orn, steps=100)
             self.controller.open_gripper(width=0.08)
             for _ in range(40): p.stepSimulation(); time.sleep(1.0/240.0)
             self.controller.move_to(goal, self.controller.z_safe, orn=self.controller.down_orn, steps=100)
-
-            for _ in range(120): 
-                p.stepSimulation()
-                time.sleep(1.0 / 240.0)
-
+            
             self.placed_counts[color] += 1
             self.state = "RETURN_HOME"
 
@@ -199,6 +226,8 @@ class Planner:
             self.state = "SCAN"
 
         elif self.state == "FINISH":
+            if self.show_vision:
+                cv2.destroyAllWindows()
             self.done = True
 
         return self.state

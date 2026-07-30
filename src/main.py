@@ -15,22 +15,31 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Embodied AI Sorting System")
     parser.add_argument("--mode", type=str, choices=["manual", "random", "nearest", "servo"], default=None)
     parser.add_argument("--cmd", type=str, default="")
+    # 🎓 增加一键启动噪声模拟的参数开关！
+    parser.add_argument("--noise", action="store_true", help="开启相机传感器高斯噪声干扰")
+    parser.add_argument("--show-vis", action="store_true", help="显示 OpenCV AI 视觉监控与数据标注窗口")
     args, unknown = parser.parse_known_args()
     return args
 
 def main() -> None:
     args = parse_args()
     
-    env = SortingEnv(gui=True)
+    # 传入 noise 开关
+    env = SortingEnv(gui=True, add_noise=args.noise)
     vision = Vision()
     controller = Controller(env)
     planner = Planner(env, vision, controller)
     nlp_parser = CommandParser()
 
+    if args.show_vis:
+        planner.show_vision = True
+
     blocks = env.reset(n_blocks=6)
 
     print("\n" + "="*50)
     print(" 🤖 多模态智能分拣系统 (Multi-Modal Sorting System)")
+    if args.noise:
+        print(" ⚠️ 警告：传感器受到高斯噪声严重干扰！")
     print(" 桌面上存在的方块:", [b.color for b in blocks])
     print("="*50)
 
@@ -62,7 +71,7 @@ def main() -> None:
         planner.set_mode("nearest")
 
     step_count = 0
-    max_steps = 1000 
+    max_steps = 1500 
     while planner.state != "FINISH" and step_count < max_steps:
         planner.step()
         step_count += 1

@@ -7,10 +7,8 @@ class Controller:
     def __init__(self, env: SortingEnv) -> None:
         self.env = env
         self.z_safe = 0.85
-        # 恢复老版本稳定高度：0.025
-        self.z_pick = WORKSPACE["z_table"] + 0.025
-        # 恢复老版本投放高度：0.12
-        self.z_drop = WORKSPACE["z_table"] + 0.12
+        self.z_pick = WORKSPACE["z_table"] + 0.015
+        self.z_drop = WORKSPACE["z_table"] + 0.050
         self.down_orn = p.getQuaternionFromEuler([np.pi, 0.0, np.pi / 2])
 
     def move_to(self, xy: list, z: float, orn: list = None, steps: int = 150) -> None:
@@ -41,10 +39,11 @@ class Controller:
             self.move_to([interp_xy[0], interp_xy[1]], z, orn=orn, steps=15)
         self.move_to([goal[0], goal[1]], z, orn=orn, steps=30)
 
-    def smooth_twist(self, xy: list, z: float, target_yaw: float, num_waypoints: int = 20) -> None:
-        current_pose, current_orn = self.env.get_ee_pose()
-        start_euler = p.getEulerFromQuaternion(current_orn)
-        start_yaw = start_euler[2]
+    # ==========================================
+    # 🎓 核心绝杀：显式角度传参（彻底免疫万向节死锁！）
+    # 绝对不去读取 getEulerFromQuaternion，直接从 start_yaw 线性插值到 target_yaw！
+    # ==========================================
+    def smooth_twist(self, xy: list, z: float, start_yaw: float, target_yaw: float, num_waypoints: int = 20) -> None:
         diff = (target_yaw - start_yaw + np.pi) % (2 * np.pi) - np.pi
         for i in range(1, num_waypoints + 1):
             interp_yaw = start_yaw + diff * (i / num_waypoints)
@@ -58,7 +57,6 @@ class Controller:
             time.sleep(1.0 / 240.0)
 
     def close_gripper(self) -> None:
-        # 恢复老版本黄金柔性宽度：0.032
         self.env.set_gripper(0.032)
         for _ in range(120):
             p.stepSimulation()
@@ -73,24 +71,28 @@ class Controller:
 
         self.open_gripper(width=0.060)
         
+        # 1. 飞往方块上方
         self.move_to(start, self.z_safe, orn=self.down_orn, steps=150)
-        self.smooth_twist(start, self.z_safe, target_yaw_world, num_waypoints=20)
         
+        # 2. 从 90度 (np.pi/2) 平滑转到目标角度，显式传参！
+        self.smooth_twist(start, self.z_safe, start_yaw=np.pi/2, target_yaw=target_yaw_world, num_waypoints=20)
+        
+        # 3. 垂直下落
         self.vertical_move(start, self.z_safe, self.z_pick, orn=dynamic_orn, num_waypoints=12)
         
         for _ in range(30): p.stepSimulation(); time.sleep(1.0 / 240.0)
         self.close_gripper()
         
+        # 4. 垂直拔起
         self.vertical_move(start, self.z_pick, self.z_safe, orn=dynamic_orn, num_waypoints=12)
-        self.smooth_twist(start, self.z_safe, np.pi / 2, num_waypoints=20)
         
+        # 5. 从目标角度平滑拧回 90度 (np.pi/2)
+        self.smooth_twist(start, self.z_safe, start_yaw=target_yaw_world, target_yaw=np.pi/2, num_waypoints=20)
+        
+        # 6. 端正平移
         self.horizontal_move(start, goal, self.z_safe, orn=self.down_orn, num_waypoints=15)
         
         self.move_to(goal, self.z_drop, orn=self.down_orn, steps=100)
         self.open_gripper(width=0.080)
         for _ in range(40): p.stepSimulation(); time.sleep(1.0 / 240.0)
         self.move_to(goal, self.z_safe, orn=self.down_orn, steps=100)
-
-        for _ in range(120): 
-            p.stepSimulation()
-            time.sleep(1.0 / 240.0)
