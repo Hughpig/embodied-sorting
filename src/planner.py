@@ -17,12 +17,12 @@ class Planner:
         self.done = False
         self.placed_counts = {"red": 0, "green": 0, "blue": 0}
         self.place_offsets = [
-            (-0.024,  0.000),  # 第 1 个：左排 - 中
-            (-0.024,  0.048),  # 第 2 个：左排 - 上
-            (-0.024, -0.048),  # 第 3 个：左排 - 下
-            ( 0.024,  0.000),  # 第 4 个：右排 - 中
-            ( 0.024,  0.048),  # 第 5 个：右排 - 上
-            ( 0.024, -0.048),  # 第 6 个：右排 - 下
+            (-0.024,  0.000),  
+            (-0.024,  0.048),  
+            (-0.024, -0.048),  
+            ( 0.024,  0.000),  
+            ( 0.024,  0.048),  
+            ( 0.024, -0.048),  
         ]
         self.task_queue = []
         self.mode = "nearest" 
@@ -30,6 +30,9 @@ class Planner:
         self.servo_lost_frames = 0
         self.debug_counter = 0
         self.show_vision = False
+        
+        # 🎓 新增：防死循环的“三振出局”计数器
+        self.servo_strike_failures = 0
 
     def set_mode(self, mode: str, tasks: list = None):
         self.mode = mode
@@ -88,6 +91,7 @@ class Planner:
                 self.current = min(self.detections, key=lambda d: d["world"][0]**2 + d["world"][1]**2)
 
             start = self.current["world"]
+            self.servo_strike_failures = 0  # 选定新目标，清空失败计数
             
             if self.mode == "servo":
                 self.servo_target_color = self.current['color']
@@ -95,7 +99,10 @@ class Planner:
                 self.controller.open_gripper(width=0.060)
                 self.controller.move_to(start, 0.85, orn=self.controller.down_orn, steps=150)
                 for _ in range(60): p.stepSimulation(); time.sleep(1.0/240.0)
+                
+                # 🎓 核心防线 1：清空键盘事件缓存，防止记仇
                 p.getKeyboardEvents()
+                
                 self.servo_lost_frames = 0
                 self.state = "VS_TRACKING"
             else:
@@ -103,18 +110,25 @@ class Planner:
                 self.state = "PICK_AND_PLACE"
 
         elif self.state == "VS_TRACKING":
+            current_pose, _ = self.env.get_ee_pose()
+            
+            # 🎓 核心防线 2：地理围栏 (Geofencing)
+            # 跑到托盘区或是桌子边缘，立刻停止追击！
+            if current_pose[1] < -0.10 or current_pose[0] < 0.20 or current_pose[0] > 0.80:
+                print(f"[Servo] ⚠️ 目标逃入隔离区或识别到虚假地标！停止追击。")
+                self.state = "RETURN_HOME"
+                return self.state
+
+            # 🎓 核心功能：恶作剧 K 键踢飞
             keys = p.getKeyboardEvents()
             if ord('k') in keys and (keys[ord('k')] & p.KEY_WAS_TRIGGERED):
                 unsorted = [b for b in self.env.blocks if b.color == self.servo_target_color and not self.env.is_block_in_target(b)]
                 if unsorted:
-                    current_pose, _ = self.env.get_ee_pose()
-                    # 🎓 核心修复：直接调用 p.getBasePositionAndOrientation(b.body_id)[0] 绕过删掉的 API！
                     target_b = min(unsorted, key=lambda b: (p.getBasePositionAndOrientation(b.body_id)[0][0] - current_pose[0])**2 + (p.getBasePositionAndOrientation(b.body_id)[0][1] - current_pose[1])**2)
-                    
                     print(f"\n[😈 恶作剧] 突发干扰！精准踢飞夹爪下的 {self.servo_target_color} 方块！")
-                    vx = random.choice([-1.0, 1.0]) * random.uniform(0.7, 1.0)
-                    vy = random.choice([-1.0, 1.0]) * random.uniform(0.7, 1.0)
-                    p.resetBaseVelocity(target_b.body_id, linearVelocity=[vx, vy, 0.0])
+                    vx = random.choice([-1.0, 1.0]) * random.uniform(0.8, 1.2)
+                    vy = random.choice([-1.0, 1.0]) * random.uniform(0.8, 1.2)
+                    p.resetBaseVelocity(target_b.body_id, linearVelocity=[vx, vy, 0])
 
             eye_img = self.env.get_eye_in_hand_image()
             target_info = self.vision.track_target(eye_img, self.servo_target_color)
@@ -136,11 +150,16 @@ class Planner:
                 except ImportError:
                     pass
             
+            # 🎓 核心防线 3：战术拉升找回视野 (Eagle Pull-Up)
             if target_info is None:
                 self.servo_lost_frames += 1
-                if self.servo_lost_frames > 15:
-                    print("[Servo] 目标跟丢了！手臂复位...")
-                    self.state = "RETURN_HOME" 
+                if self.servo_lost_frames > 5:
+                    if current_pose[2] < 0.75:
+                        print("[Servo] ⚠️ 目标滑出视野！战术拉升扩大视野 (Eagle Pull-Up)...")
+                        self.controller.move_delta(0.0, 0.0, 0.03, orn=self.controller.down_orn, steps=10)
+                    elif self.servo_lost_frames > 25:
+                        print("[Servo] ❌ 彻底跟丢了！手臂复位...")
+                        self.state = "RETURN_HOME" 
                 return self.state
                 
             self.servo_lost_frames = 0
@@ -156,14 +175,12 @@ class Planner:
             
             self.debug_counter += 1
             if self.debug_counter % 10 == 0:
-                current_pose, _ = self.env.get_ee_pose()
                 print(f"[DEBUG Servo] eX:{err_x:4d} | eY:{err_y:4d} | eYaw:{yaw_deg:5.1f}° | Z:{current_pose[2]:.3f}")
             
             Kp = 0.00010
             dx = np.clip(err_x * Kp, -0.015, 0.015)
             dy = np.clip(-err_y * Kp, -0.015, 0.015)
             
-            current_pose, _ = self.env.get_ee_pose()
             target_yaw_world = np.pi / 2 + yaw
             dynamic_orn = p.getQuaternionFromEuler([np.pi, 0.0, target_yaw_world])
             
@@ -177,7 +194,31 @@ class Planner:
                     for _ in range(20): p.stepSimulation() 
                     
                     self.controller.close_gripper()
-                    self.state = "VS_DELIVER"
+                    
+                    # ==========================================
+                    # 🎓 核心防线 4：本体感觉抓空检测 (Proprioception Grasp Check)
+                    # ==========================================
+                    joint_states = p.getJointStates(self.env.robot_id, self.env.finger_joint_indices)
+                    finger_width = joint_states[0][0] + joint_states[1][0]
+                    
+                    # 设定阈值为 0.0335 (包容物理引擎1.5mm的穿模形变)
+                    if finger_width < 0.0335: 
+                        self.servo_strike_failures += 1
+                        if self.servo_strike_failures >= 3:
+                            print(f"[Servo] ❌ 连续 {self.servo_strike_failures} 次抓捕失败！目标大概率为幻影。放弃追击！")
+                            self.servo_strike_failures = 0
+                            self.state = "RETURN_HOME"
+                        else:
+                            print(f"[Servo] ⚠️ 糟糕！抓了一把空气！(第 {self.servo_strike_failures} 次)")
+                            print("[Servo] 紧急释放，重新进入追猎模式！")
+                            self.controller.open_gripper(width=0.060)
+                            # 立刻拉升回 0.75m 高空，恢复视野！
+                            self.controller.vertical_move([current_pose[0], current_pose[1]], self.controller.z_pick, 0.75, orn=self.controller.down_orn, num_waypoints=10)
+                            self.state = "VS_TRACKING" 
+                    else:
+                        print("[Servo] 📦 抓取物理校验成功！")
+                        self.servo_strike_failures = 0
+                        self.state = "VS_DELIVER"
                 else:
                     self.controller.move_delta(dx, dy, 0.0, orn=self.controller.down_orn, steps=15)
             else:
