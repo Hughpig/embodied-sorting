@@ -16,6 +16,8 @@ class Planner:
         self.current = None
         self.done = False
         self.placed_counts = {"red": 0, "green": 0, "blue": 0}
+        
+        # 🎓 2x3 紧凑型双排矩阵，严丝合缝
         self.place_offsets = [
             (-0.024,  0.000),  
             (-0.024,  0.048),  
@@ -30,8 +32,6 @@ class Planner:
         self.servo_lost_frames = 0
         self.debug_counter = 0
         self.show_vision = False
-        
-        # 🎓 新增：防死循环的“三振出局”计数器
         self.servo_strike_failures = 0
 
     def set_mode(self, mode: str, tasks: list = None):
@@ -41,6 +41,16 @@ class Planner:
         self.state = "SCAN"
 
     def step(self) -> str:
+        # ==========================================
+        # 🎓 核心特性：全局键盘事件监听 (支持 R 键一键重开)
+        # ==========================================
+        keys = p.getKeyboardEvents()
+        if ord('r') in keys and (keys[ord('r')] & p.KEY_WAS_TRIGGERED):
+            print("\n[🕹️ 热键触发] 🔄 检测到 'R' 键，紧急终止当前流程，重置环境！")
+            self.state = "FINISH"
+            self.done = True
+            return self.state
+
         if self.state == "WAIT_FOR_COMMAND":
             pass
             
@@ -62,12 +72,17 @@ class Planner:
             for d in raw_dets:
                 u, v = d["pixel"]
                 x_vision, y_vision = self.env.pixel_to_world(u, v)
-                cam_x, cam_y, cam_z = 0.50, 0.0, 1.40
-                table_z = WORKSPACE["z_table"]
-                block_z = table_z + 0.04
-                ratio = (cam_z - block_z) / (cam_z - table_z)
+                
+                # ==========================================
+                # 🎓 核心特性：微米级 3D 侧壁视差几何纠偏公式
+                # Ratio = (1.40 - 0.645) / (1.40 - 0.625) ≈ 0.974
+                # ==========================================
+                cam_x, cam_y = 0.50, 0.0
+                ratio = 0.755 / 0.775 
+                
                 x_real = cam_x + (x_vision - cam_x) * ratio
                 y_real = cam_y + (y_vision - cam_y) * ratio
+                
                 if 0.25 <= x_real <= 0.70 and -0.10 <= y_real <= 0.35:
                     d["world"] = (x_real, y_real)
                     self.detections.append(d)
@@ -91,7 +106,7 @@ class Planner:
                 self.current = min(self.detections, key=lambda d: d["world"][0]**2 + d["world"][1]**2)
 
             start = self.current["world"]
-            self.servo_strike_failures = 0  # 选定新目标，清空失败计数
+            self.servo_strike_failures = 0
             
             if self.mode == "servo":
                 self.servo_target_color = self.current['color']
@@ -100,9 +115,7 @@ class Planner:
                 self.controller.move_to(start, 0.85, orn=self.controller.down_orn, steps=150)
                 for _ in range(60): p.stepSimulation(); time.sleep(1.0/240.0)
                 
-                # 🎓 核心防线 1：清空键盘事件缓存，防止记仇
-                p.getKeyboardEvents()
-                
+                p.getKeyboardEvents() # 清空键盘记仇缓存
                 self.servo_lost_frames = 0
                 self.state = "VS_TRACKING"
             else:
@@ -112,15 +125,15 @@ class Planner:
         elif self.state == "VS_TRACKING":
             current_pose, _ = self.env.get_ee_pose()
             
-            # 🎓 核心防线 2：地理围栏 (Geofencing)
-            # 跑到托盘区或是桌子边缘，立刻停止追击！
+            # 🎓 核心特性：地理围栏防撞
             if current_pose[1] < -0.10 or current_pose[0] < 0.20 or current_pose[0] > 0.80:
                 print(f"[Servo] ⚠️ 目标逃入隔离区或识别到虚假地标！停止追击。")
                 self.state = "RETURN_HOME"
                 return self.state
 
-            # 🎓 核心功能：恶作剧 K 键踢飞
-            keys = p.getKeyboardEvents()
+            # ==========================================
+            # 🎓 核心特性：动态 K 键恶作剧追踪
+            # ==========================================
             if ord('k') in keys and (keys[ord('k')] & p.KEY_WAS_TRIGGERED):
                 unsorted = [b for b in self.env.blocks if b.color == self.servo_target_color and not self.env.is_block_in_target(b)]
                 if unsorted:
@@ -150,7 +163,9 @@ class Planner:
                 except ImportError:
                     pass
             
-            # 🎓 核心防线 3：战术拉升找回视野 (Eagle Pull-Up)
+            # ==========================================
+            # 🎓 核心特性：战术拉升恢复视野
+            # ==========================================
             if target_info is None:
                 self.servo_lost_frames += 1
                 if self.servo_lost_frames > 5:
@@ -196,23 +211,20 @@ class Planner:
                     self.controller.close_gripper()
                     
                     # ==========================================
-                    # 🎓 核心防线 4：本体感觉抓空检测 (Proprioception Grasp Check)
+                    # 🎓 核心特性：本体感觉防空抓机制 (0.0335)
                     # ==========================================
                     joint_states = p.getJointStates(self.env.robot_id, self.env.finger_joint_indices)
                     finger_width = joint_states[0][0] + joint_states[1][0]
                     
-                    # 设定阈值为 0.0335 (包容物理引擎1.5mm的穿模形变)
                     if finger_width < 0.0335: 
                         self.servo_strike_failures += 1
                         if self.servo_strike_failures >= 3:
-                            print(f"[Servo] ❌ 连续 {self.servo_strike_failures} 次抓捕失败！目标大概率为幻影。放弃追击！")
+                            print(f"[Servo] ❌ 连续 {self.servo_strike_failures} 次抓捕失败！放弃追击！")
                             self.servo_strike_failures = 0
                             self.state = "RETURN_HOME"
                         else:
                             print(f"[Servo] ⚠️ 糟糕！抓了一把空气！(第 {self.servo_strike_failures} 次)")
-                            print("[Servo] 紧急释放，重新进入追猎模式！")
                             self.controller.open_gripper(width=0.060)
-                            # 立刻拉升回 0.75m 高空，恢复视野！
                             self.controller.vertical_move([current_pose[0], current_pose[1]], self.controller.z_pick, 0.75, orn=self.controller.down_orn, num_waypoints=10)
                             self.state = "VS_TRACKING" 
                     else:
